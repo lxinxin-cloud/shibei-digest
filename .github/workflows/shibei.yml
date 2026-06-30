@@ -2,8 +2,14 @@ name: Shibei Digest
 
 on:
   workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Force a run even if the 48-hour interval has not elapsed"
+        required: false
+        default: true
+        type: boolean
   schedule:
-    - cron: "0 1 */2 * *"
+    - cron: "0 0 * * *"
 
 permissions:
   contents: write
@@ -40,9 +46,11 @@ jobs:
 
       - name: Build digest and send notifications
         run: |
-          python scripts/shibei_digest.py \
-            --public-dir public \
-            --output-dir output
+          ARGS="--public-dir public --output-dir output --max-pages 8 --min-run-interval-hours 36"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_run }}" = "true" ]; then
+            ARGS="$ARGS --force-run --notify-empty"
+          fi
+          python scripts/shibei_digest.py $ARGS
 
       - name: Commit generated state and pages
         run: |
