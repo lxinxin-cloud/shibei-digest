@@ -40,9 +40,16 @@ EXCLUDE_KEYWORDS = (
     "淘宝",
     "京东",
     "小说",
+    "长篇",
+    "短篇",
     "连载",
     "番外",
     "章节",
+    "第1章",
+    "第2章",
+    "第3章",
+    "第4章",
+    "第5章",
     "赞助",
     "推广",
 )
@@ -99,6 +106,12 @@ def parse_chinese_date(value: str) -> dt.datetime | None:
     return dt.datetime(year, month, day, tzinfo=dt.timezone(dt.timedelta(hours=8)))
 
 
+def digest_page_url(page_number: int) -> str:
+    if page_number <= 1:
+        return DIGEST_URL
+    return f"{DIGEST_URL}page/{page_number}/"
+
+
 def parse_digest_page(page_html: str) -> list[Article]:
     soup = BeautifulSoup(page_html, "html.parser")
     articles: list[Article] = []
@@ -131,6 +144,29 @@ def parse_digest_page(page_html: str) -> list[Article]:
     return articles
 
 
+def fetch_digest_articles(window_start: dt.datetime, max_pages: int) -> list[Article]:
+    earliest_date = window_start.astimezone(dt.timezone(dt.timedelta(hours=8))).date()
+    articles: list[Article] = []
+    seen_urls: set[str] = set()
+
+    for page_number in range(1, max_pages + 1):
+        page_articles = parse_digest_page(fetch(digest_page_url(page_number)))
+        if not page_articles:
+            break
+
+        for article in page_articles:
+            if article.url in seen_urls:
+                continue
+            articles.append(article)
+            seen_urls.add(article.url)
+
+        dated_articles = [article for article in page_articles if article.published]
+        if dated_articles and all(article.published.date() < earliest_date for article in dated_articles):
+            break
+
+    return articles
+
+
 def classify(title: str, summary: str) -> str:
     text = f"{title} {summary}"
     rules = [
@@ -151,20 +187,63 @@ def should_exclude(article: Article) -> bool:
     return any(keyword in text for keyword in EXCLUDE_KEYWORDS)
 
 
-def load_seen(path: Path) -> set[str]:
+def load_state(path: Path) -> dict[str, object]:
     if not path.exists():
-        return set()
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        return {}
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def load_seen(path: Path) -> set[str]:
+    data = load_state(path)
+    seen_urls = data.get("seen_urls", [])
+    if not isinstance(seen_urls, list):
         return set()
-    return set(data.get("seen_urls", []))
+    return set(str(url) for url in seen_urls)
+
+
+def last_checked_at(path: Path) -> dt.datetime | None:
+    value = load_state(path).get("last_checked_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo:
+        return parsed
+    return parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def is_due(path: Path, min_run_interval_hours: int) -> bool:
+    if min_run_interval_hours <= 0:
+        return True
+    last_checked = last_checked_at(path)
+    if not last_checked:
+        return True
+    elapsed = dt.datetime.now(dt.timezone.utc) - last_checked.astimezone(dt.timezone.utc)
+    return elapsed >= dt.timedelta(hours=min_run_interval_hours)
+
+
+def article_window_start(path: Path, max_age_hours: int) -> dt.datetime:
+    max_age_start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max_age_hours)
+    last_checked = last_checked_at(path)
+    if last_checked and last_checked.astimezone(dt.timezone.utc) < max_age_start:
+        return last_checked.astimezone(dt.timezone.utc)
+    return max_age_start
 
 
 def save_seen(path: Path, seen_urls: Iterable[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
     payload = {
-        "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "updated_at": now,
+        "last_checked_at": now,
         "seen_urls": sorted(set(seen_urls)),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -173,17 +252,16 @@ def save_seen(path: Path, seen_urls: Iterable[str]) -> None:
 def select_new_articles(
     articles: list[Article],
     seen_urls: set[str],
-    max_age_hours: int,
+    window_start: dt.datetime,
     include_seen: bool,
 ) -> list[Article]:
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-    earliest = now - dt.timedelta(hours=max_age_hours)
+    earliest_date = window_start.astimezone(dt.timezone(dt.timedelta(hours=8))).date()
     selected: list[Article] = []
 
     for article in articles:
         if not include_seen and article.url in seen_urls:
             continue
-        if article.published and article.published < earliest:
+        if article.published and article.published.date() < earliest_date:
             continue
         if should_exclude(article):
             continue
@@ -483,6 +561,9 @@ def send_feishu(articles: list[Article], html_path: Path) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build and send Bohaishibei digest.")
     parser.add_argument("--max-age-hours", type=int, default=48)
+    parser.add_argument("--max-pages", type=int, default=5)
+    parser.add_argument("--min-run-interval-hours", type=int, default=0)
+    parser.add_argument("--force-run", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Do not send notifications or update state.")
     parser.add_argument("--include-seen", action="store_true", help="Include URLs already in state.")
     parser.add_argument("--state-path", type=Path, default=STATE_PATH)
@@ -509,13 +590,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    html_text = fetch(DIGEST_URL)
-    articles = parse_digest_page(html_text)[: args.limit]
+    if not args.force_run and not args.dry_run and not is_due(args.state_path, args.min_run_interval_hours):
+        print(json.dumps(
+            {
+                "skipped": True,
+                "reason": "min_run_interval_hours_not_reached",
+                "state_path": str(args.state_path),
+                "min_run_interval_hours": args.min_run_interval_hours,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0
+
     seen_urls = load_seen(args.state_path)
+    window_start = article_window_start(args.state_path, args.max_age_hours)
+    articles = fetch_digest_articles(window_start, args.max_pages)[: args.limit]
     selected = select_new_articles(
         articles,
         seen_urls=seen_urls,
-        max_age_hours=args.max_age_hours,
+        window_start=window_start,
         include_seen=args.include_seen,
     )
     html_path, md_path = write_outputs(selected, args.output_dir, args.public_dir)
@@ -543,6 +637,7 @@ def main() -> int:
         {
             "found": len(articles),
             "selected": len(selected),
+            "window_start": window_start.isoformat(),
             "html": str(html_path),
             "markdown": str(md_path),
             "bark_sent": bark_sent,
