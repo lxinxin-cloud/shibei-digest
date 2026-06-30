@@ -94,4 +94,4 @@ python3 scripts/shibei_digest.py
 https://lxinxin-cloud.github.io/shibei-digest/latest.html
 ```
 
-之后 workflow 会按 UTC 时间每两天 01:00 自动运行一次。没有新文章时不会推送空通知；有新文章时会推送 Bark 和飞书。
+之后 workflow 会在每天 UTC 00:00 检查一次，也就是北京时间早晨 8:00。脚本只有在距离上次完整检查足够久后才真正抓取和推送，所以实际节奏是每两天早晨 8:00 运行一次。抓取会按发布时间向后翻多页，直到越过上次成功检查/最近 48 小时的窗口；这样文章多于第一页时也不会漏。没有新文章时不会推送空通知；有新文章时会推送 Bark 和飞书。
