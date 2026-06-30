@@ -584,6 +584,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Send Bark and Feishu notifications even when no new articles are selected.",
     )
+    parser.add_argument(
+        "--require-delivery",
+        action="store_true",
+        help="Fail the run when a notification was expected but Bark or Feishu did not send.",
+    )
     parser.add_argument("--limit", type=int, default=30)
     return parser.parse_args()
 
@@ -630,6 +635,12 @@ def main() -> int:
             except Exception as exc:
                 errors.append(f"Feishu: {exc}")
 
+            if args.require_delivery:
+                if not bark_sent and not any(error.startswith("Bark:") for error in errors):
+                    errors.append("Bark: not sent")
+                if not feishu_sent and not any(error.startswith("Feishu:") for error in errors):
+                    errors.append("Feishu: not sent")
+
         if bark_sent or feishu_sent or args.save_without_delivery or not should_notify:
             save_seen(args.state_path, seen_urls | {article.url for article in selected})
 
@@ -648,7 +659,7 @@ def main() -> int:
         ensure_ascii=False,
         indent=2,
     ))
-    return 1 if errors and not (bark_sent or feishu_sent) else 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
