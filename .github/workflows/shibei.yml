@@ -46,7 +46,7 @@ jobs:
 
       - name: Build digest and send notifications
         run: |
-          ARGS="--public-dir public --output-dir output --max-pages 8 --min-run-interval-hours 36"
+          ARGS="--public-dir public --output-dir output --max-pages 8 --min-run-interval-hours 36 --require-delivery"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_run }}" = "true" ]; then
             ARGS="$ARGS --force-run --notify-empty"
           fi
