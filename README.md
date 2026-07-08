@@ -1,97 +1,94 @@
 # 拾贝文章汇总
 
-每 48 小时抓取博海拾贝“文摘”分类的新文章，过滤广告、优惠、推广、小说/连载类内容，生成手机友好的 HTML 和 Markdown 归档，并推送到 Bark 与飞书。
+自动抓取博海拾贝“文摘”分类的新文章，过滤广告、优惠、推广、小说/连载类内容，生成适合手机阅读的 HTML 和 Markdown，并推送到 Bark 与飞书。
 
-## 本地运行
+当前公网归档入口：
+
+```text
+https://lxinxin-cloud.github.io/shibei-digest/
+```
+
+## 运行方式
+
+推荐生产方式是 GitHub Actions + GitHub Pages。仓库里的 `.github/workflows/shibei.yml` 会每天 UTC 00:00 触发一次，也就是北京时间早晨 8:00。脚本使用 `--min-run-interval-hours 36` 做间隔门禁，所以实际只会每两天早晨 8:00 生成和推送一次。
+
+手动触发：
+
+```text
+GitHub -> Actions -> Shibei Digest -> Run workflow
+```
+
+手动触发默认带 `--force-run --notify-empty`，适合测试 Bark、飞书和 Pages 发布链路。
+
+## 本地开发
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 scripts/shibei_digest.py --dry-run
+python3 scripts/shibei_digest.py --dry-run --include-seen --max-pages 8 --limit 80
 ```
 
-输出文件会写到 `output/`，已推送文章记录在 `state/seen_articles.json`。
+本地输出默认写到 `output/`。正式静态页面写到 `public/archive/shibei-digest-YYYY-MM-DD-HHMM.html` 和对应 Markdown；`public/index.html` 会列出所有历史集合。`public/latest.html` 和 `public/latest.md` 仍会写入，但只作为旧链接兼容入口，不再作为推送里的主链接。去重和上次检查时间记录在 `state/seen_articles.json`。
 
 ## 推送配置
 
-不要把 token 或 webhook 写进代码。最简单的是运行前设置环境变量：
+不要把 token、device key 或 webhook 写进代码或文档。
+
+GitHub Actions 需要两个 repository secrets：
+
+- `BARK_DEVICE_KEY`
+- `FEISHU_WEBHOOK_URL`
+
+本地运行可以用环境变量：
 
 ```bash
 export BARK_DEVICE_KEY="你的 Bark device key"
 export FEISHU_WEBHOOK_URL="你的飞书机器人 webhook"
-python3 scripts/shibei_digest.py
+export PUBLIC_BASE_URL="https://lxinxin-cloud.github.io/shibei-digest"
+python3 scripts/shibei_digest.py --public-dir public
 ```
 
-更适合定时自动化的是存到 macOS Keychain。脚本会自动读取下面两个 service：
+也可以写入 macOS Keychain：
 
 ```bash
 chmod +x scripts/setup_secrets.sh
 scripts/setup_secrets.sh
 ```
 
-也可以手动写入：
+Bark 需要的是 Bark App 首页里推送 URL 的设备码，通常来自 `https://api.day.app/设备码/...`，不是 iOS 系统 device token。
 
-```bash
-security add-generic-password -a "$USER" -s shibei_digest_BARK_DEVICE_KEY -w "你的 Bark device key" -U
-security add-generic-password -a "$USER" -s shibei_digest_FEISHU_WEBHOOK_URL -w "你的飞书机器人 webhook" -U
-```
+## 抓取逻辑
 
-可选配置：
-
-```bash
-export PUBLIC_BASE_URL="https://你的公开目录"
-export BARK_SERVER="https://api.day.app"
-```
-
-Bark 需要的是 Bark App 首页里显示的推送链接设备码，通常来自类似 `https://api.day.app/设备码/标题/内容` 的链接；不要使用 iOS 系统的 device token。
-
-如果设置了 `PUBLIC_BASE_URL`，Bark 通知会打开对应的 HTML 汇总链接；否则 Bark 只发送提醒和标题列表，完整摘要会发到飞书。
-
-## 定时运行
-
-Codex 自动化或系统计划任务每 48 小时运行：
-
-```bash
-cd "/Users/flxx/Desktop/XX Zone/8. My AI_Prod/WebNews"
-python3 scripts/shibei_digest.py
-```
-
-第一次正式运行会推送最近 48 小时内符合条件的文章，之后通过 `state/seen_articles.json` 去重。
-
-如果 Bark 和飞书都没有配置，脚本仍会生成 HTML/Markdown，但不会更新去重状态，避免自动化空跑后错过文章。
-
-## GitHub Actions + Pages 公网运行
-
-这个仓库已经包含 `.github/workflows/shibei.yml`，可在 GitHub 云端每两天自动运行并发布页面。
-
-### 1. 配置仓库 Secrets
-
-进入 GitHub 仓库：
-
-`Settings -> Secrets and variables -> Actions -> New repository secret`
-
-添加两个 secret：
-
-- `BARK_DEVICE_KEY`
-- `FEISHU_WEBHOOK_URL`
-
-### 2. 开启 GitHub Pages
-
-进入：
-
-`Settings -> Pages`
-
-把 `Build and deployment` 的 Source 设为 `GitHub Actions`。
-
-### 3. 手动触发第一次运行
-
-进入：
-
-`Actions -> Shibei Digest -> Run workflow`
-
-运行成功后，最新页面会发布到：
+入口是：
 
 ```text
-https://lxinxin-cloud.github.io/shibei-digest/latest.html
+https://www.bohaishibei.com/post/category/digest/
 ```
 
-之后 workflow 会在每天 UTC 00:00 检查一次，也就是北京时间早晨 8:00。脚本只有在距离上次完整检查足够久后才真正抓取和推送，所以实际节奏是每两天早晨 8:00 运行一次。抓取会按发布时间向后翻多页，直到越过上次成功检查/最近 48 小时的窗口；这样文章多于第一页时也不会漏。没有新文章时不会推送空通知；有新文章时会推送 Bark 和飞书。
+脚本会从第一页开始按页抓取，最多抓取 `--max-pages` 页。每页解析文章标题、URL、发布日期和摘要，并按发布时间判断是否进入本次窗口。窗口起点取“最近 `--max-age-hours` 小时”和 `state/seen_articles.json` 中 `last_checked_at` 的更早值，这样如果某次 GitHub Actions 延迟或失败，下一次可以回补。
+
+由于站点列表只有日期、没有精确时间，选择文章时按北京时间的日期比较。多页抓取会在整页文章日期都早于窗口起始日期时停止。
+
+过滤规则在 `scripts/shibei_digest.py` 的 `EXCLUDE_KEYWORDS`，目前覆盖广告、优惠、推广、小说、连载、番外、章节等关键词。如果后续发现误收或误杀，优先改这里并用 dry run 验证。
+
+## 验证
+
+常用检查：
+
+```bash
+python3 -m compileall scripts
+python3 scripts/shibei_digest.py --dry-run --include-seen --max-pages 8 --limit 80
+```
+
+GitHub 侧需要确认：
+
+- Actions 最近一次 `Shibei Digest` 运行成功。
+- GitHub Pages Source 是 `GitHub Actions`。
+- Secrets 中存在 `BARK_DEVICE_KEY` 和 `FEISHU_WEBHOOK_URL`。
+- 手机可打开 `https://lxinxin-cloud.github.io/shibei-digest/` 并回看历史集合。
+
+## 交接资料
+
+接手开发前请先读：
+
+- `AGENTS.md`：给后续 coding agent/维护者的项目规则。
+- `PROJECT_MEMORY.md`：当前配置、线上状态、已知风险和下一步建议。

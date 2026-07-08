@@ -3,10 +3,135 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="0; url=latest.html">
-  <title>拾贝文章汇总</title>
+  <title>拾贝文章汇总归档</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f4ef;
+      --fg: #1f2328;
+      --muted: #667085;
+      --card: #fffdf8;
+      --line: #e4ddd2;
+      --accent: #0f766e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171717;
+        --fg: #efefef;
+        --muted: #a3a3a3;
+        --card: #222;
+        --line: #383838;
+        --accent: #5eead4;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+    }
+    main {
+      width: min(760px, 100%);
+      margin: 0 auto;
+      padding: 28px 16px 48px;
+    }
+    header {
+      padding: 8px 0 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 22px;
+    }
+    h1 {
+      font-size: 30px;
+      line-height: 1.2;
+      margin: 0 0 10px;
+      letter-spacing: 0;
+    }
+    p { margin: 0 0 12px; }
+    .sub, .links {
+      color: var(--muted);
+      font-size: 14px;
+    }
+    ol {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    li {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin: 12px 0;
+      padding: 14px 16px;
+    }
+    a {
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .primary { font-size: 18px; }
+    .badge {
+      display: inline-block;
+      margin-left: 8px;
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
+    .links {
+      display: block;
+      margin-top: 4px;
+    }
+  </style>
 </head>
 <body>
-  <p><a href="latest.html">打开最新拾贝文章汇总</a></p>
+  <main>
+    <header>
+      <h1>拾贝文章汇总归档</h1>
+      <p class="sub">每次汇总保留独立日期文件，可回看历史集合。</p>
+    </header>
+    <ol>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-07-08-1051.html">2026-07-08 10:51</a>
+        <span class="badge">最新</span>
+        <span class="links"><a href="archive/shibei-digest-2026-07-08-1051.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-07-06-1143.html">2026-07-06 11:43</a>
+        <span class="links"><a href="archive/shibei-digest-2026-07-06-1143.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-07-04-1120.html">2026-07-04 11:20</a>
+        <span class="links"><a href="archive/shibei-digest-2026-07-04-1120.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-07-02-1146.html">2026-07-02 11:46</a>
+        <span class="links"><a href="archive/shibei-digest-2026-07-02-1146.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-06-30-1752.html">2026-06-30 17:52</a>
+        <span class="links"><a href="archive/shibei-digest-2026-06-30-1752.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-06-30-1749.html">2026-06-30 17:49</a>
+        <span class="links"><a href="archive/shibei-digest-2026-06-30-1749.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-06-30-1734.html">2026-06-30 17:34</a>
+        <span class="links"><a href="archive/shibei-digest-2026-06-30-1734.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-06-30-1733.html">2026-06-30 17:33</a>
+        <span class="links"><a href="archive/shibei-digest-2026-06-30-1733.md">Markdown</a></span>
+      </li>
+      <li>
+        <a class="primary" href="archive/shibei-digest-2026-06-30-1700.html">2026-06-30 17:00</a>
+        <span class="links"><a href="archive/shibei-digest-2026-06-30-1700.md">Markdown</a></span>
+      </li>
+    </ol>
+  </main>
 </body>
 </html>

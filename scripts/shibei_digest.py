@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Iterable
 
@@ -444,6 +445,154 @@ def render_html(articles: list[Article], generated_at: dt.datetime) -> str:
 """
 
 
+def archive_label(path: Path) -> str:
+    match = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})", path.name)
+    if not match:
+        return path.stem
+    year, month, day, hour, minute = match.groups()
+    return f"{year}-{month}-{day} {hour}:{minute}"
+
+
+def public_href(path: Path, public_dir: Path) -> str:
+    try:
+        relative = path.relative_to(public_dir)
+    except ValueError:
+        relative = Path(path.name)
+    return urllib.parse.quote(str(relative).replace(os.sep, "/"), safe="/-.")
+
+
+def render_archive_index(public_dir: Path, generated_at: dt.datetime) -> str:
+    archive_dir = public_dir / "archive"
+    archive_files = sorted(archive_dir.glob("shibei-digest-*.html"), reverse=True)
+    rows: list[str] = []
+
+    for index, html_path in enumerate(archive_files):
+        md_path = html_path.with_suffix(".md")
+        latest_badge = '<span class="badge">最新</span>' if index == 0 else ""
+        md_link = ""
+        if md_path.exists():
+            md_link = f'<a href="{public_href(md_path, public_dir)}">Markdown</a>'
+        rows.append(
+            f"""
+<li>
+  <a class="primary" href="{public_href(html_path, public_dir)}">{html.escape(archive_label(html_path))}</a>
+  {latest_badge}
+  <span class="links">{md_link}</span>
+</li>
+"""
+        )
+
+    if not rows:
+        rows.append('<li class="empty">还没有归档汇总。</li>')
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>拾贝文章汇总归档</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --bg: #f7f4ef;
+      --fg: #1f2328;
+      --muted: #667085;
+      --card: #fffdf8;
+      --line: #e4ddd2;
+      --accent: #0f766e;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #171717;
+        --fg: #efefef;
+        --muted: #a3a3a3;
+        --card: #222;
+        --line: #383838;
+        --accent: #5eead4;
+      }}
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.75;
+    }}
+    main {{
+      width: min(760px, 100%);
+      margin: 0 auto;
+      padding: 28px 16px 48px;
+    }}
+    header {{
+      padding: 8px 0 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 22px;
+    }}
+    h1 {{
+      font-size: 30px;
+      line-height: 1.2;
+      margin: 0 0 10px;
+      letter-spacing: 0;
+    }}
+    p {{
+      margin: 0 0 12px;
+    }}
+    .sub, .links, .empty {{
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    ol {{
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }}
+    li {{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin: 12px 0;
+      padding: 14px 16px;
+    }}
+    a {{
+      color: var(--accent);
+      font-weight: 700;
+      text-decoration: none;
+    }}
+    .primary {{
+      font-size: 18px;
+    }}
+    .badge {{
+      display: inline-block;
+      margin-left: 8px;
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 12px;
+    }}
+    .links {{
+      display: block;
+      margin-top: 4px;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>拾贝文章汇总归档</h1>
+      <p class="sub">更新时间：{generated_at:%Y-%m-%d %H:%M} · 每次汇总保留独立日期文件</p>
+    </header>
+    <ol>
+      {''.join(rows)}
+    </ol>
+  </main>
+</body>
+</html>
+"""
+
+
 def write_outputs(
     articles: list[Article],
     output_dir: Path,
@@ -471,22 +620,28 @@ def write_outputs(
     latest_md = public_dir / "latest.md"
     archive_html = archive_dir / f"shibei-digest-{stamp}.html"
     archive_md = archive_dir / f"shibei-digest-{stamp}.md"
+    index_html = public_dir / "index.html"
 
     latest_html.write_text(html_content, encoding="utf-8")
     latest_md.write_text(markdown_content, encoding="utf-8")
     archive_html.write_text(html_content, encoding="utf-8")
     archive_md.write_text(markdown_content, encoding="utf-8")
-    return latest_html, latest_md
+    index_html.write_text(render_archive_index(public_dir, generated_at), encoding="utf-8")
+    return archive_html, archive_md
 
 
-def public_url_for(path: Path) -> str | None:
+def public_url_for(path: Path, public_dir: Path | None = None) -> str | None:
     base_url = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         return None
-    return f"{base_url}/{path.name}"
+    if public_dir:
+        href = public_href(path, public_dir)
+    else:
+        href = urllib.parse.quote(path.name, safe="/-.")
+    return f"{base_url}/{href}"
 
 
-def send_bark(articles: list[Article], html_path: Path) -> bool:
+def send_bark(articles: list[Article], html_path: Path, public_dir: Path | None) -> bool:
     key = secret("BARK_DEVICE_KEY")
     if not key:
         return False
@@ -500,7 +655,7 @@ def send_bark(articles: list[Article], html_path: Path) -> bool:
         "body": body,
         "group": "拾贝文章汇总",
     }
-    url = public_url_for(html_path)
+    url = public_url_for(html_path, public_dir)
     if url:
         payload["url"] = url
     payload["device_key"] = key
@@ -510,9 +665,13 @@ def send_bark(articles: list[Article], html_path: Path) -> bool:
     return True
 
 
-def feishu_blocks(articles: list[Article], html_path: Path) -> list[list[dict[str, str]]]:
+def feishu_blocks(
+    articles: list[Article],
+    html_path: Path,
+    public_dir: Path | None,
+) -> list[list[dict[str, str]]]:
     lines: list[list[dict[str, str]]] = []
-    url = public_url_for(html_path)
+    url = public_url_for(html_path, public_dir)
     if url:
         lines.append([{"tag": "a", "text": "打开手机优化 HTML", "href": url}])
         lines.append([{"tag": "text", "text": ""}])
@@ -535,7 +694,7 @@ def feishu_blocks(articles: list[Article], html_path: Path) -> list[list[dict[st
     return lines
 
 
-def send_feishu(articles: list[Article], html_path: Path) -> bool:
+def send_feishu(articles: list[Article], html_path: Path, public_dir: Path | None) -> bool:
     webhook = secret("FEISHU_WEBHOOK_URL")
     if not webhook:
         return False
@@ -545,7 +704,7 @@ def send_feishu(articles: list[Article], html_path: Path) -> bool:
             "post": {
                 "zh_cn": {
                     "title": f"拾贝文章汇总：{len(articles)} 篇新文",
-                    "content": feishu_blocks(articles, html_path),
+                    "content": feishu_blocks(articles, html_path, public_dir),
                 }
             }
         },
@@ -626,12 +785,12 @@ def main() -> int:
         should_notify = bool(selected) or args.notify_empty
         if should_notify:
             try:
-                bark_sent = send_bark(selected, html_path)
+                bark_sent = send_bark(selected, html_path, args.public_dir)
             except Exception as exc:
                 errors.append(f"Bark: {exc}")
 
             try:
-                feishu_sent = send_feishu(selected, html_path)
+                feishu_sent = send_feishu(selected, html_path, args.public_dir)
             except Exception as exc:
                 errors.append(f"Feishu: {exc}")
 
