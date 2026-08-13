@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
+import hashlib
 import html
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import requests
 from bs4 import BeautifulSoup
@@ -54,6 +58,11 @@ EXCLUDE_KEYWORDS = (
     "赞助",
     "推广",
 )
+
+# Feishu custom-bot requests are limited to 20 KB. Keep a safety margin for
+# envelope fields and use compact UTF-8 JSON when sending the request.
+FEISHU_MAX_PAYLOAD_BYTES = 17_000
+FEISHU_SUMMARY_LIMIT = 120
 
 
 def secret(name: str) -> str:
@@ -150,7 +159,8 @@ def fetch_digest_articles(window_start: dt.datetime, max_pages: int) -> list[Art
     articles: list[Article] = []
     seen_urls: set[str] = set()
 
-    for page_number in range(1, max_pages + 1):
+    page_number = 1
+    while max_pages <= 0 or page_number <= max_pages:
         page_articles = parse_digest_page(fetch(digest_page_url(page_number)))
         if not page_articles:
             break
@@ -164,6 +174,7 @@ def fetch_digest_articles(window_start: dt.datetime, max_pages: int) -> list[Art
         dated_articles = [article for article in page_articles if article.published]
         if dated_articles and all(article.published.date() < earliest_date for article in dated_articles):
             break
+        page_number += 1
 
     return articles
 
@@ -271,6 +282,31 @@ def select_new_articles(
     return selected
 
 
+def selection_counts(
+    articles: list[Article],
+    seen_urls: set[str],
+    window_start: dt.datetime,
+    include_seen: bool,
+) -> dict[str, int]:
+    """Summarize the filtering stages so a run can prove whether it truncated."""
+    earliest_date = window_start.astimezone(dt.timezone(dt.timedelta(hours=8))).date()
+    in_window = [
+        article
+        for article in articles
+        if not article.published or article.published.date() >= earliest_date
+    ]
+    filtered = [article for article in in_window if not should_exclude(article)]
+    unseen = [article for article in filtered if article.url not in seen_urls]
+    candidates = filtered if include_seen else unseen
+    return {
+        "fetched": len(articles),
+        "in_window": len(in_window),
+        "excluded": len(in_window) - len(filtered),
+        "already_seen": len(filtered) - len(unseen),
+        "selected_before_limit": len(candidates),
+    }
+
+
 def short_summary(article: Article, limit: int = 160) -> str:
     summary = article.summary or "暂无摘要。"
     if len(summary) <= limit:
@@ -320,6 +356,26 @@ def reading_hint(article: Article) -> str:
     if article.category == "生活":
         return "轻松阅读，适合休息时看。"
     return "看标题兴趣决定。"
+
+
+@contextlib.contextmanager
+def run_lock(state_path: Path) -> Iterator[bool]:
+    """Serialize runs that share a state file, including manual re-runs."""
+    lock_id = hashlib.sha256(str(state_path.resolve()).encode("utf-8")).hexdigest()[:16]
+    lock_path = Path(tempfile.gettempdir()) / f"shibei-digest-{lock_id}.lock"
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def render_html(articles: list[Article], generated_at: dt.datetime) -> str:
@@ -446,11 +502,33 @@ def render_html(articles: list[Article], generated_at: dt.datetime) -> str:
 
 
 def archive_label(path: Path) -> str:
-    match = re.search(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})", path.name)
+    match = re.search(
+        r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(?:(\d{2}))?(?:-(\d+))?",
+        path.name,
+    )
     if not match:
         return path.stem
-    year, month, day, hour, minute = match.groups()
-    return f"{year}-{month}-{day} {hour}:{minute}"
+    year, month, day, hour, minute, second, collision = match.groups()
+    label = f"{year}-{month}-{day} {hour}:{minute}"
+    if second:
+        label += f":{second}"
+    if collision:
+        label += f"（第{int(collision) + 1}次）"
+    return label
+
+
+def unique_stamp(directory: Path, generated_at: dt.datetime) -> str:
+    """Return a collision-safe archive stamp for repeated runs."""
+    base = generated_at.strftime("%Y-%m-%d-%H%M%S")
+    stamp = base
+    collision = 0
+    while any(
+        (directory / f"shibei-digest-{stamp}{suffix}").exists()
+        for suffix in (".html", ".md")
+    ):
+        collision += 1
+        stamp = f"{base}-{collision:02d}"
+    return stamp
 
 
 def public_href(path: Path, public_dir: Path) -> str:
@@ -600,7 +678,8 @@ def write_outputs(
 ) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_at = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-    stamp = generated_at.strftime("%Y-%m-%d-%H%M")
+    stamp_directory = public_dir / "archive" if public_dir else output_dir
+    stamp = unique_stamp(stamp_directory, generated_at)
     html_content = render_html(articles, generated_at)
     markdown_content = render_markdown(articles, generated_at)
 
@@ -648,7 +727,7 @@ def send_bark(articles: list[Article], html_path: Path, public_dir: Path | None)
     server = os.getenv("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
     title = f"拾贝新文 {len(articles)} 篇"
     body = "本次没有新的合适文章。" if not articles else "\n".join(
-        f"{idx}. {article.title}" for idx, article in enumerate(articles[:8], 1)
+        f"{idx}. [{article.title}]({article.url})" for idx, article in enumerate(articles, 1)
     )
     payload = {
         "title": title,
@@ -658,6 +737,9 @@ def send_bark(articles: list[Article], html_path: Path, public_dir: Path | None)
     url = public_url_for(html_path, public_dir)
     if url:
         payload["url"] = url
+    if articles:
+        payload["markdown"] = body
+        payload.pop("body", None)
     payload["device_key"] = key
     response = requests.post(f"{server}/push", json=payload, timeout=20)
     if response.status_code >= 400:
@@ -683,7 +765,7 @@ def feishu_blocks(
     for category, items in group_articles(articles).items():
         lines.append([{"tag": "text", "text": f"【{category}】"}])
         for index, article in enumerate(items, 1):
-            text = f"{index}. {article.title}\n{short_summary(article, 120)}\n"
+            text = f"{index}. {article.title}\n{short_summary(article, FEISHU_SUMMARY_LIMIT)}\n"
             lines.append(
                 [
                     {"tag": "text", "text": text},
@@ -694,33 +776,124 @@ def feishu_blocks(
     return lines
 
 
-def send_feishu(articles: list[Article], html_path: Path, public_dir: Path | None) -> bool:
-    webhook = secret("FEISHU_WEBHOOK_URL")
-    if not webhook:
-        return False
-    payload = {
+def feishu_payload(
+    articles: list[Article],
+    blocks: list[list[dict[str, str]]],
+    chunk_number: int = 1,
+    chunk_count: int = 1,
+) -> dict[str, object]:
+    suffix = f"（{chunk_number}/{chunk_count}）" if chunk_count > 1 else ""
+    return {
         "msg_type": "post",
         "content": {
             "post": {
                 "zh_cn": {
-                    "title": f"拾贝文章汇总：{len(articles)} 篇新文",
-                    "content": feishu_blocks(articles, html_path, public_dir),
+                    "title": f"拾贝文章汇总：{len(articles)} 篇新文{suffix}",
+                    "content": blocks,
                 }
             }
         },
     }
-    response = requests.post(webhook, json=payload, timeout=20)
-    response.raise_for_status()
-    data = response.json()
-    if data.get("code") not in (0, None):
-        raise RuntimeError(f"Feishu webhook rejected message: {data}")
+
+
+def feishu_payload_bytes(payload: dict[str, object]) -> int:
+    return len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def feishu_payloads(
+    articles: list[Article],
+    html_path: Path,
+    public_dir: Path | None,
+) -> list[dict[str, object]]:
+    """Build size-bounded Feishu messages without separating article links."""
+    if not articles:
+        return [feishu_payload(articles, feishu_blocks(articles, html_path, public_dir))]
+
+    archive_prefix: list[list[dict[str, str]]] = []
+    url = public_url_for(html_path, public_dir)
+    if url:
+        archive_prefix = [
+            [{"tag": "a", "text": "打开手机优化 HTML", "href": url}],
+            [{"tag": "text", "text": ""}],
+        ]
+
+    chunks: list[list[list[dict[str, str]]]] = []
+    current = list(archive_prefix)
+    current_category: str | None = None
+    current_articles = 0
+
+    for category, items in group_articles(articles).items():
+        for index, article in enumerate(items, 1):
+            category_blocks: list[list[dict[str, str]]] = []
+            if current_category != category:
+                category_blocks.append([{"tag": "text", "text": f"【{category}】"}])
+            article_text = f"{index}. {article.title}\n{short_summary(article, FEISHU_SUMMARY_LIMIT)}\n"
+            article_blocks = [
+                [
+                    {"tag": "text", "text": article_text},
+                    {"tag": "a", "text": "原文", "href": article.url},
+                ]
+            ]
+            candidate = current + category_blocks + article_blocks
+            candidate_payload = feishu_payload(articles, candidate)
+            if current_articles and feishu_payload_bytes(candidate_payload) > FEISHU_MAX_PAYLOAD_BYTES:
+                chunks.append(current)
+                current = list(archive_prefix)
+                current.append([{"tag": "text", "text": f"【{category}】"}])
+                current.extend(article_blocks)
+                current_category = category
+                current_articles = 1
+                continue
+            current = candidate
+            current_category = category
+            current_articles += 1
+
+        if current_category == category:
+            blank = [{"tag": "text", "text": ""}]
+            if feishu_payload_bytes(feishu_payload(articles, current + [blank])) <= FEISHU_MAX_PAYLOAD_BYTES:
+                current.append(blank)
+            current_category = None
+
+    if current:
+        chunks.append(current)
+
+    chunk_count = len(chunks)
+    return [
+        feishu_payload(articles, blocks, index, chunk_count)
+        for index, blocks in enumerate(chunks, 1)
+    ]
+
+
+def send_feishu(articles: list[Article], html_path: Path, public_dir: Path | None) -> bool:
+    webhook = secret("FEISHU_WEBHOOK_URL")
+    if not webhook:
+        return False
+    for payload in feishu_payloads(articles, html_path, public_dir):
+        raw_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        response = requests.post(
+            webhook,
+            data=raw_payload,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("code") not in (0, None):
+            raise RuntimeError(f"Feishu webhook rejected message: {data}")
     return True
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build and send Bohaishibei digest.")
     parser.add_argument("--max-age-hours", type=int, default=48)
-    parser.add_argument("--max-pages", type=int, default=5)
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=0,
+        help="Maximum pages to crawl; 0 means continue until the window is covered.",
+    )
     parser.add_argument("--min-run-interval-hours", type=int, default=0)
     parser.add_argument("--force-run", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Do not send notifications or update state.")
@@ -748,12 +921,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail the run when a notification was expected but Bark or Feishu did not send.",
     )
-    parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum selected articles; 0 means no cap (apply after filtering).",
+    )
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def run(args: argparse.Namespace) -> int:
     if not args.force_run and not args.dry_run and not is_due(args.state_path, args.min_run_interval_hours):
         print(json.dumps(
             {
@@ -769,13 +946,18 @@ def main() -> int:
 
     seen_urls = load_seen(args.state_path)
     window_start = article_window_start(args.state_path, args.max_age_hours)
-    articles = fetch_digest_articles(window_start, args.max_pages)[: args.limit]
+    articles = fetch_digest_articles(window_start, args.max_pages)
+    counts = selection_counts(articles, seen_urls, window_start, args.include_seen)
     selected = select_new_articles(
         articles,
         seen_urls=seen_urls,
         window_start=window_start,
         include_seen=args.include_seen,
     )
+    if args.limit > 0:
+        selected = selected[: args.limit]
+    counts["selected"] = len(selected)
+    counts["truncated"] = max(counts["selected_before_limit"] - len(selected), 0)
     html_path, md_path = write_outputs(selected, args.output_dir, args.public_dir)
 
     bark_sent = False
@@ -805,8 +987,7 @@ def main() -> int:
 
     print(json.dumps(
         {
-            "found": len(articles),
-            "selected": len(selected),
+            **counts,
             "window_start": window_start.isoformat(),
             "html": str(html_path),
             "markdown": str(md_path),
@@ -819,6 +1000,23 @@ def main() -> int:
         indent=2,
     ))
     return 1 if errors else 0
+
+
+def main() -> int:
+    args = parse_args()
+    with run_lock(args.state_path) as acquired:
+        if not acquired:
+            print(json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "another_run_in_progress",
+                    "state_path": str(args.state_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ))
+            return 0
+        return run(args)
 
 
 if __name__ == "__main__":

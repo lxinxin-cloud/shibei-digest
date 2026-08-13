@@ -1,6 +1,6 @@
 # Project Memory: Shibei Digest
 
-Last updated: 2026-07-01, Asia/Shanghai.
+Last updated: 2026-07-17, Asia/Shanghai.
 
 ## What This Project Does
 
@@ -23,7 +23,7 @@ https://lxinxin-cloud.github.io/shibei-digest/
 - Runtime: GitHub Actions.
 - Hosting: GitHub Pages, configured for GitHub Actions deployment.
 - Schedule: daily cron at UTC 00:00, which is Beijing/Shanghai 08:00.
-- Effective cadence: every two days, enforced by `--min-run-interval-hours 36`.
+- Effective cadence: every two days, enforced by `--min-run-interval-hours 36`; the local Codex automation has been disabled, so GitHub Actions is the only production scheduler.
 - Notifications: Bark and Feishu.
 - Required GitHub Actions secrets:
   - `BARK_DEVICE_KEY`
@@ -48,7 +48,9 @@ Secrets are already configured in the GitHub repository as of this handoff, but 
 
 The script uses `https://www.bohaishibei.com/post/category/digest/` as the crawl source, not the entire homepage. This was chosen because the user wants readable article digests and wants to avoid ad/deal/novel-style content.
 
-The crawler paginates through digest pages using `--max-pages`. Production currently passes `--max-pages 8`. It stops early when every dated article on a page is older than the crawl window.
+The crawler paginates through digest pages using `--max-pages`; production now passes `--max-pages 0`, meaning it continues until every dated article on a page is older than the crawl window.
+
+Production no longer passes a 30-article cap. The default `--limit 0` means no cap; a positive limit is applied only after date filtering, ad/fiction filtering, and seen-URL deduplication. Run JSON reports each stage and `truncated`.
 
 The crawl window starts at the earlier of:
 
@@ -76,7 +78,7 @@ Manual workflow dispatch:
 
 - Filtering is keyword-based. If long stories or ads slip through, update `EXCLUDE_KEYWORDS` in `scripts/shibei_digest.py`.
 - If the site changes HTML structure, inspect `parse_digest_page()` first. It currently relies on `#recent-content .post`, `h2.entry-title a`, `.entry-date`, and `.entry-summary`.
-- If article volume rises above eight pages per two-day window, increase `--max-pages` in `.github/workflows/shibei.yml`.
+- If the site pagination stops exposing older pages, inspect `fetch_digest_articles()` and the reported `fetched`/`in_window` counts.
 - If GitHub Actions is delayed, the date-window logic should still backfill, but very old backfills may include more articles than desired.
 - Bark and Feishu open the dated archive page when `PUBLIC_BASE_URL` is set. GitHub Actions sets it to the GitHub Pages base URL.
 - Feishu receives structured rich text plus the dated public HTML link.
@@ -88,7 +90,7 @@ Use this before handing the project back after changes:
 
 ```bash
 python3 -m compileall scripts
-python3 scripts/shibei_digest.py --dry-run --include-seen --max-pages 8 --limit 80
+python3 scripts/shibei_digest.py --dry-run --include-seen
 ```
 
 Then check, if touching deployment or notifications:
@@ -119,3 +121,23 @@ The branch divergence happened because some remote fixes were applied outside a 
 - Add a dry-run summary that prints page count and stop reason.
 - Consider a simple allow/deny review log for filtered titles if the user wants better quality control.
 - Consider content-length or per-article heuristics only if keyword filtering proves insufficient.
+
+## Local Preview Run (Occasional)
+
+Verified 2026-07-17. Use this to preview the current digest locally without touching production state, notifications, or the cloud cadence. Not part of the regular flow — the normal path is GitHub Actions.
+
+Why: the local repo can diverge from origin and local `state/seen_articles.json` can be stale, so the preview uses the cloud state as its starting point.
+
+```bash
+cd "<repo root>"
+gh api repos/lxinxin-cloud/shibei-digest/contents/state/seen_articles.json --jq '.content' | base64 -d > /tmp/shibei_preview_state.json
+python3 scripts/shibei_digest.py --dry-run --state-path /tmp/shibei_preview_state.json --output-dir output
+```
+
+Behavior notes:
+
+- `--dry-run` still writes `output/shibei-digest-YYYY-MM-DD-HHMM.{html,md}` but sends no Bark/Feishu notifications and saves no state.
+- Window and dedupe match production because the state file comes from the cloud repo via `gh api`.
+- Requires `gh` CLI authenticated (confirmed working on this machine 2026-07-17) and local Python deps installed.
+- `raw.githubusercontent.com` is unreachable from this network; use `gh api` instead of curl for repo files.
+- Latest published collection time is visible at `https://lxinxin-cloud.github.io/shibei-digest/`.

@@ -10,7 +10,7 @@ https://lxinxin-cloud.github.io/shibei-digest/
 
 ## 运行方式
 
-推荐生产方式是 GitHub Actions + GitHub Pages。仓库里的 `.github/workflows/shibei.yml` 会每天 UTC 00:00 触发一次，也就是北京时间早晨 8:00。脚本使用 `--min-run-interval-hours 36` 做间隔门禁，所以实际只会每两天早晨 8:00 生成和推送一次。
+推荐生产方式是 GitHub Actions + GitHub Pages。仓库里的 `.github/workflows/shibei.yml` 会每天 UTC 00:00 触发一次，也就是北京时间早晨 8:00；脚本使用 `--min-run-interval-hours 36` 做间隔门禁，所以实际每两天推送一次。当前本地 Codex 自动化已停用，GitHub Actions 是唯一生产调度器。
 
 手动触发：
 
@@ -24,10 +24,12 @@ GitHub -> Actions -> Shibei Digest -> Run workflow
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 scripts/shibei_digest.py --dry-run --include-seen --max-pages 8 --limit 80
+python3 scripts/shibei_digest.py --dry-run --include-seen
 ```
 
-本地输出默认写到 `output/`。正式静态页面写到 `public/archive/shibei-digest-YYYY-MM-DD-HHMM.html` 和对应 Markdown；`public/index.html` 会列出所有历史集合。`public/latest.html` 和 `public/latest.md` 仍会写入，但只作为旧链接兼容入口，不再作为推送里的主链接。去重和上次检查时间记录在 `state/seen_articles.json`。
+本地输出默认写到 `output/`。正式静态页面写到 `public/archive/shibei-digest-YYYY-MM-DD-HHMMSS.html` 和对应 Markdown；重复运行即使发生在同一秒也会自动追加碰撞编号。`public/index.html` 会列出所有历史集合。`public/latest.html` 和 `public/latest.md` 仍会写入，但只作为旧链接兼容入口，不再作为推送里的主链接。去重和上次检查时间记录在 `state/seen_articles.json`。
+
+推送保护：飞书消息使用紧凑 UTF-8 JSON，并在接近自定义机器人 20 KB 上限前拆分消息；每个拆分消息都保留文章原文链接。Bark 使用 Markdown 将每篇标题显示为可点击链接，同时保留整期归档入口。共享同一状态文件的进程会通过锁串行执行，避免重复启动时互相覆盖归档或重复推送。生产默认不限制文章数量；如需临时限制，可使用 `--limit N`，限制发生在过滤广告和去重之后。
 
 ## 推送配置
 
@@ -64,7 +66,7 @@ Bark 需要的是 Bark App 首页里推送 URL 的设备码，通常来自 `http
 https://www.bohaishibei.com/post/category/digest/
 ```
 
-脚本会从第一页开始按页抓取，最多抓取 `--max-pages` 页。每页解析文章标题、URL、发布日期和摘要，并按发布时间判断是否进入本次窗口。窗口起点取“最近 `--max-age-hours` 小时”和 `state/seen_articles.json` 中 `last_checked_at` 的更早值，这样如果某次 GitHub Actions 延迟或失败，下一次可以回补。
+脚本会从第一页开始按页抓取，默认持续抓取到窗口覆盖完成（`--max-pages 0`）；每页解析文章标题、URL、发布日期和摘要，并按发布时间判断是否进入本次窗口。窗口起点取“最近 `--max-age-hours` 小时”和 `state/seen_articles.json` 中 `last_checked_at` 的更早值，这样如果某次 GitHub Actions 延迟或失败，下一次可以回补。运行 JSON 会同时报告 `fetched`、`in_window`、`excluded`、`already_seen`、`selected_before_limit`、`selected` 和 `truncated`，用于核对是否存在截断。
 
 由于站点列表只有日期、没有精确时间，选择文章时按北京时间的日期比较。多页抓取会在整页文章日期都早于窗口起始日期时停止。
 
@@ -76,7 +78,7 @@ https://www.bohaishibei.com/post/category/digest/
 
 ```bash
 python3 -m compileall scripts
-python3 scripts/shibei_digest.py --dry-run --include-seen --max-pages 8 --limit 80
+python3 scripts/shibei_digest.py --dry-run --include-seen
 ```
 
 GitHub 侧需要确认：
