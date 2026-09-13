@@ -63,6 +63,8 @@ EXCLUDE_KEYWORDS = (
 # envelope fields and use compact UTF-8 JSON when sending the request.
 FEISHU_MAX_PAYLOAD_BYTES = 17_000
 FEISHU_SUMMARY_LIMIT = 120
+BARK_MAX_PAYLOAD_BYTES = 4_000
+BARK_PREVIEW_LIMIT = 10
 
 
 def secret(name: str) -> str:
@@ -726,22 +728,40 @@ def send_bark(articles: list[Article], html_path: Path, public_dir: Path | None)
         return False
     server = os.getenv("BARK_SERVER", "https://api.day.app").strip().rstrip("/")
     title = f"拾贝新文 {len(articles)} 篇"
-    body = "本次没有新的合适文章。" if not articles else "\n".join(
-        f"{idx}. [{article.title}]({article.url})" for idx, article in enumerate(articles, 1)
-    )
     payload = {
         "title": title,
-        "body": body,
+        "body": "本次没有新的合适文章。",
         "group": "拾贝文章汇总",
+        "device_key": key,
     }
     url = public_url_for(html_path, public_dir)
     if url:
         payload["url"] = url
     if articles:
-        payload["markdown"] = body
         payload.pop("body", None)
-    payload["device_key"] = key
-    response = requests.post(f"{server}/push", json=payload, timeout=20)
+    # Bound the encoded request, including the envelope and archive link.
+    preview_count = min(len(articles), BARK_PREVIEW_LIMIT)
+    while True:
+        if articles:
+            lines = [
+                f"{idx}. [{article.title[:100]}]({article.url})"
+                for idx, article in enumerate(articles[:preview_count], 1)
+            ]
+            if url:
+                lines.append(f"[阅读完整汇总（{len(articles)} 篇）]({url})")
+            elif preview_count < len(articles):
+                lines.append(f"共 {len(articles)} 篇，完整内容见飞书或 HTML 归档。")
+            payload["markdown"] = "\n".join(lines)
+        raw_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(raw_payload) <= BARK_MAX_PAYLOAD_BYTES:
+            break
+        if preview_count == 0:
+            raise RuntimeError("Bark notification metadata exceeds the payload budget")
+        preview_count -= 1
+    response = requests.post(
+        f"{server}/push", data=raw_payload,
+        headers={"Content-Type": "application/json; charset=utf-8"}, timeout=20,
+    )
     if response.status_code >= 400:
         raise RuntimeError(f"{response.status_code} {response.text[:500]}")
     return True
@@ -897,6 +917,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-run-interval-hours", type=int, default=0)
     parser.add_argument("--force-run", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Do not send notifications or update state.")
+    parser.add_argument(
+        "--recover-without-notify", action="store_true",
+        help="Archive the selected backlog and advance state without sending it again.",
+    )
     parser.add_argument("--include-seen", action="store_true", help="Include URLs already in state.")
     parser.add_argument("--state-path", type=Path, default=STATE_PATH)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
@@ -958,13 +982,18 @@ def run(args: argparse.Namespace) -> int:
         selected = selected[: args.limit]
     counts["selected"] = len(selected)
     counts["truncated"] = max(counts["selected_before_limit"] - len(selected), 0)
-    html_path, md_path = write_outputs(selected, args.output_dir, args.public_dir)
+    existing_archives = sorted((args.public_dir / "archive").glob("shibei-digest-*.html")) if args.public_dir else []
+    if not selected and existing_archives:
+        html_path = existing_archives[-1]
+        md_path = html_path.with_suffix(".md")
+    else:
+        html_path, md_path = write_outputs(selected, args.output_dir, args.public_dir)
 
     bark_sent = False
     feishu_sent = False
     errors: list[str] = []
     if not args.dry_run:
-        should_notify = bool(selected) or args.notify_empty
+        should_notify = (bool(selected) or args.notify_empty) and not args.recover_without_notify
         if should_notify:
             try:
                 bark_sent = send_bark(selected, html_path, args.public_dir)
@@ -994,6 +1023,7 @@ def run(args: argparse.Namespace) -> int:
             "bark_sent": bark_sent,
             "feishu_sent": feishu_sent,
             "dry_run": args.dry_run,
+            "recovery_without_notify": args.recover_without_notify,
             "errors": errors,
         },
         ensure_ascii=False,

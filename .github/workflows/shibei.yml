@@ -4,9 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       force_run:
-        description: "Force a run even if the 48-hour interval has not elapsed"
+        description: "Force a run even if the 36-hour interval has not elapsed"
         required: false
         default: true
+        type: boolean
+      recovery_only:
+        description: "Archive already-delivered backlog and advance state without notifications"
+        required: false
+        default: false
         type: boolean
   schedule:
     - cron: "0 0 * * *"
@@ -44,10 +49,18 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Test digest behavior
+        run: python -m unittest discover -s tests -v
+
       - name: Build digest and send notifications
+        id: digest
+        # Preserve generated pages and successful delivery state on partial failure.
+        continue-on-error: true
         run: |
           ARGS="--public-dir public --output-dir output --max-pages 0 --min-run-interval-hours 36 --require-delivery"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_run }}" = "true" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.recovery_only }}" = "true" ]; then
+            ARGS="$ARGS --force-run --recover-without-notify"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_run }}" = "true" ]; then
             ARGS="$ARGS --force-run --notify-empty"
           fi
           python scripts/shibei_digest.py $ARGS
@@ -75,3 +88,9 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Report digest failure after saving and deploying
+        if: ${{ always() && steps.digest.outcome == 'failure' }}
+        run: |
+          echo "::error::Digest failed; check the build step for notification or crawl errors."
+          exit 1

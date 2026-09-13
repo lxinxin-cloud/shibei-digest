@@ -1,4 +1,7 @@
 import json
+import argparse
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,9 +73,76 @@ class NotificationRegressionTests(unittest.TestCase):
 
         self.assertTrue(digest.send_bark(articles, Path("digest.html"), None))
 
-        payload = post.call_args.kwargs["json"]
+        payload = json.loads(post.call_args.kwargs["data"])
         self.assertNotIn("body", payload)
         self.assertEqual(payload["markdown"].count("https://www.bohaishibei.com/post/"), 9)
+
+    @patch.object(digest, "secret", return_value="test-key")
+    @patch.object(digest.requests, "post")
+    @patch.dict(digest.os.environ, {"PUBLIC_BASE_URL": "https://example.com/digest"})
+    def test_bark_backlog_is_bounded_and_links_to_full_archive(self, post, _secret):
+        post.return_value = Mock(status_code=200)
+        articles = make_articles(170)
+        archive = Path("public/archive/digest.html")
+
+        self.assertTrue(digest.send_bark(articles, archive, Path("public")))
+
+        kwargs = post.call_args.kwargs
+        raw = kwargs.get("data") or json.dumps(kwargs["json"]).encode("utf-8")
+        payload = json.loads(raw)
+        self.assertLessEqual(len(raw), 4096)
+        self.assertIn("170", payload["title"])
+        self.assertEqual(payload["url"], "https://example.com/digest/archive/digest.html")
+        self.assertIn(payload["url"], payload["markdown"])
+        self.assertLess(payload["markdown"].count("https://www.bohaishibei.com/post/"), 170)
+
+    @patch.object(digest, "fetch_digest_articles", return_value=make_articles(3))
+    @patch.object(digest, "send_bark", side_effect=RuntimeError("413 Request Entity Too Large"))
+    @patch.object(digest, "send_feishu", return_value=True)
+    def test_partial_delivery_saves_checkpoint_and_does_not_resend(self, feishu, bark, fetch):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            args = argparse.Namespace(
+                force_run=False, dry_run=False, min_run_interval_hours=0,
+                state_path=root / "state.json", max_age_hours=48, max_pages=0,
+                include_seen=False, limit=0, output_dir=root / "output",
+                public_dir=root / "public", notify_empty=False,
+                require_delivery=True, save_without_delivery=False,
+                recover_without_notify=False,
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(digest.run(args), 1)
+                self.assertEqual(len(digest.load_seen(args.state_path)), 3)
+                self.assertTrue((args.public_dir / "index.html").exists())
+                self.assertEqual(digest.run(args), 0)
+            self.assertEqual(feishu.call_count, 1)
+            self.assertEqual(bark.call_count, 1)
+
+    @patch.object(digest, "fetch_digest_articles", return_value=make_articles(170))
+    @patch.object(digest, "send_bark")
+    @patch.object(digest, "send_feishu")
+    def test_recovery_archives_without_delivery_then_normal_run_has_no_backlog(self, feishu, bark, fetch):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            argv = ["digest", "--recover-without-notify", "--require-delivery",
+                    "--state-path", str(root / "state.json"),
+                    "--public-dir", str(root / "public"),
+                    "--output-dir", str(root / "output")]
+            with patch.object(digest.sys, "argv", argv):
+                args = digest.parse_args()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(digest.run(args), 0)
+                self.assertEqual(len(digest.load_seen(args.state_path)), 170)
+                archives = list((args.public_dir / "archive").glob("*.html"))
+                self.assertEqual(len(archives), 1)
+                self.assertIn("/post/169/", archives[0].read_text())
+                latest = (args.public_dir / "latest.html").read_bytes()
+                args.recover_without_notify = False
+                self.assertEqual(digest.run(args), 0)
+                self.assertEqual((args.public_dir / "latest.html").read_bytes(), latest)
+                self.assertEqual(list((args.public_dir / "archive").glob("*.html")), archives)
+            bark.assert_not_called()
+            feishu.assert_not_called()
 
     def test_feishu_payload_is_compact_utf8_json(self) -> None:
         articles = make_articles(29)
